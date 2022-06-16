@@ -2,6 +2,8 @@ import os, sys
 from pickletools import optimize
 import cv2
 import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
 from scipy.spatial.transform import Rotation as R
 import scipy.optimize as spo
 
@@ -323,21 +325,26 @@ def homography_compare(wp, ip):
     N = wp.shape[0] # The number of corners.
 
     Errs = np.zeros((N,2), dtype=np.float64)
+    cv2_ip = np.zeros((N,2), dtype=np.float64)
+    opt_ip = np.zeros((N,2), dtype=np.float64)
 
     for n, (src, dst) in enumerate(zip(wp,ip)):
 
         hom_src = src.copy() # a second point in the first image.
         hom_src[2] = 1 # conversion to homogeneous coordinates.
 
-        cv2_ip = np.dot(cv2_H, hom_src) # an estimated image point of wp01.
-        opt_ip = np.dot(opt_H, hom_src) # an estimated image point of wp01.
+        cv2_dst = np.dot(cv2_H, hom_src) # an estimated image point of wp01.
+        opt_dst = np.dot(opt_H, hom_src) # an estimated image point of wp01.
 
-        cv2_E = np.linalg.norm(ip[n]-(cv2_ip/cv2_ip[2])[:-1])
-        opt_E = np.linalg.norm(ip[n]-(opt_ip/opt_ip[2])[:-1])
+        cv2_E = np.linalg.norm(dst-(cv2_dst/cv2_dst[2])[:-1])
+        opt_E = np.linalg.norm(dst-(opt_dst/opt_dst[2])[:-1])
+
+        cv2_ip[n] = (cv2_dst/cv2_dst[2])[:-1]
+        opt_ip[n] = (opt_dst/opt_dst[2])[:-1]
 
         Errs[n] = (cv2_E, opt_E)
 
-    return Errs
+    return Errs, cv2_ip, opt_ip
 
 if __name__ == '__main__':
 
@@ -356,31 +363,19 @@ if __name__ == '__main__':
     #h, w = raw_img.shape[:2]
     #print(h,w)
 
-    #H = estimate_homography(wps[0], ips[0])
-    #opt_H, numJ = refine_homography(H, wps[0], ips[0])
-
-    #print(H/H[2,2])
-    #print(opt_H)
-
-    #J = jac(H.reshape(-1), wps[0])
-
     Hs = get_homographies(wps, ips)
 
-    Errs0 = homography_compare(wps[0], ips[0])
-    #cv2_E1, opt_E1 = homography_compare(wps[1], ips[1])
+    Errs0, cv2_ip0, opt_ip0 = homography_compare(wps[0], ips[0])
 
-    #print(cv2_E0, opt_E0)
-    #print(cv2_E1, opt_E1)
-
+    df = pd.DataFrame(Errs0, columns=['opencv', 'mine'])
+    print(df)
+    ax = df.plot(style=['-', 'o'])
+    ax.set_xlabel('Corner number')
+    ax.set_ylabel(r'$\|\|e\|\|$')
+    ax.get_figure().savefig('error.png')
+    
     """
-    opt_H0 = Hs[0]
-    opt_H1 = Hs[1]
-    opt_H2 = Hs[2]
-
     ret, intr, dist, rvecs, tvecs = cv2.calibrateCamera(wps, ips, (h_npixels, w_npixels), None, None)
-    cv2_H0, status = cv2.findHomography(wps[0], ips[0])
-    cv2_H1, status = cv2.findHomography(wps[1], ips[1])
-    cv2_H2, status = cv2.findHomography(wps[2], ips[2])
 
     r = R.from_mrp(np.squeeze(rvecs[0]))
     rot = r.as_matrix()
@@ -389,35 +384,6 @@ if __name__ == '__main__':
     extr[:,2] = np.squeeze(tvecs[0])
     cv2_H0 = np.dot(intr,extr)
     cv2_H0 /= cv2_H0[2,2]
-
-    wp01 = wps[0][1].copy() # a second point in the first image.
-    wp01[2] = 1 # conversion to homogeneous coordinates.
-
-    wp11 = wps[1][1].copy() # a second point in the second image.
-    wp11[2] = 1 # conversion to homogeneous coordinates.
-
-    wp21 = wps[2][1].copy() # a second point in the third image.
-    wp21[2] = 1 # conversion to homogeneous coordinates.
-
-    opt_ip01 = np.dot(opt_H0, wp01) # an estimated image point of wp01.
-    opt_ip11 = np.dot(opt_H1, wp11) # an estimated image point of wp11.
-    opt_ip21 = np.dot(opt_H2, wp21) # an estimated image point of wp21.
-
-    cv2_ip01 = np.dot(cv2_H0, wp01) # an estimated image point of wp01.
-    cv2_ip11 = np.dot(cv2_H1, wp11) # an estimated image point of wp11.
-    cv2_ip21 = np.dot(cv2_H2, wp21) # an estimated image point of wp21.
-
-    cv2_E01 = np.linalg.norm(ips[0][1]-(cv2_ip01/cv2_ip01[2])[:-1])
-    cv2_E11 = np.linalg.norm(ips[1][1]-(cv2_ip11/cv2_ip11[2])[:-1])
-    cv2_E21 = np.linalg.norm(ips[2][1]-(cv2_ip21/cv2_ip21[2])[:-1])
-
-    opt_E01 = np.linalg.norm(ips[0][1]-(opt_ip01/opt_ip01[2])[:-1])
-    opt_E11 = np.linalg.norm(ips[1][1]-(opt_ip11/opt_ip11[2])[:-1])
-    opt_E21 = np.linalg.norm(ips[2][1]-(opt_ip21/opt_ip21[2])[:-1])
-
-    print(cv2_E01, opt_E01)
-    print(cv2_E11, opt_E11)
-    print(cv2_E21, opt_E21)
 
     print("dist : \n")
     print(dist)
@@ -428,25 +394,25 @@ if __name__ == '__main__':
     """
 
     cv2.destroyAllWindows()
+    sys.exit()
 
-sys.exit()
-# Using the derived camera parameters to undistort the image
-for fname in fnames_raw:
+    # Using the derived camera parameters to undistort the image
+    for fname in fnames_raw:
 
-    img = cv2.imread(raw_dir+fname)
-    # Refining the camera matrix using parameters obtained by calibration
-    newcameramtx, roi = cv2.getOptimalNewCameraMatrix(mtx, dist, (w, h), 1, (w, h))
+        img = cv2.imread(raw_dir+fname)
+        # Refining the camera matrix using parameters obtained by calibration
+        newcameramtx, roi = cv2.getOptimalNewCameraMatrix(mtx, dist, (w, h), 1, (w, h))
 
-    # Method 1 to undistort the image
-    dst = cv2.undistort(img, mtx, dist, None, newcameramtx)
+        # Method 1 to undistort the image
+        dst = cv2.undistort(img, mtx, dist, None, newcameramtx)
 
-    # Method 2 to undistort the image
-    #mapx, mapy = cv2.initUndistortRectifyMap(mtx, dist, None, newcameramtx, (w, h), 5)
-    #dst = cv2.remap(img, mapx, mapy, cv2.INTER_LINEAR)
+        # Method 2 to undistort the image
+        #mapx, mapy = cv2.initUndistortRectifyMap(mtx, dist, None, newcameramtx, (w, h), 5)
+        #dst = cv2.remap(img, mapx, mapy, cv2.INTER_LINEAR)
 
-    # Displaying the undistorted image
-    #cv2.imshow("undistorted image", dst)
-    #cv2.waitKey(0)
+        # Displaying the undistorted image
+        #cv2.imshow("undistorted image", dst)
+        #cv2.waitKey(0)
 
-    # Save the undistorted image.
-    cv2.imwrite(f'{undist_dir}{fname}', dst)
+        # Save the undistorted image.
+        cv2.imwrite(f'{undist_dir}{fname}', dst)
