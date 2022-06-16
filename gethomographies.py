@@ -68,6 +68,19 @@ def get_world_points(CHECKERBOARD, raw_dir, save_dir):
 
     return wps, ips, fnames_found, (h,w)
 
+def get_homographies(wps, ips):
+
+    M = len(wps) # The number of the views, i.e. the images.
+    Hs = []
+
+    for m, (wp, ip) in enumerate(zip(wps,ips)):
+
+        H_init = estimate_homography(wp, ip)
+        opt_H, jac = refine_homography(H_init, wp, ip)
+        Hs.append(opt_H)
+
+    return Hs
+
 def estimate_homography(wp, ip):
     """Estimate the homography matrix for each image
 
@@ -213,14 +226,18 @@ def refine_homography(H, wp, ip):
 
     h = H.reshape(-1)
 
-    result = spo.leastsq(residuals, h, args=(M, wp))
+    result = spo.least_squares(residuals, h, method='lm', args=(M, wp))
+    #result = spo.leastsq(residuals, h, args=(M, wp)) # MINPACK wrapper.
 
     # return the optimized homography.
-    hh = result[0]
+    hh = result.x
+    #hh = result[0]
     hh /= hh[8]
     hh = hh.reshape(3,3)
 
-    return hh
+    J = result.jac
+
+    return hh, J
 
 def residuals(h, M, wp):
 
@@ -294,6 +311,34 @@ def jac(h, wp):
 
     return J
 
+def homography_compare(wp, ip):
+
+    # The homography obtained by using built-in function in OpenCV.
+    cv2_H, status = cv2.findHomography(wp, ip)
+
+    # The homography optained by me.
+    H_init = estimate_homography(wp, ip)
+    opt_H, J = refine_homography(H_init, wp, ip)
+
+    N = wp.shape[0] # The number of corners.
+
+    Errs = np.zeros((N,2), dtype=np.float64)
+
+    for n, (src, dst) in enumerate(zip(wp,ip)):
+
+        hom_src = src.copy() # a second point in the first image.
+        hom_src[2] = 1 # conversion to homogeneous coordinates.
+
+        cv2_ip = np.dot(cv2_H, hom_src) # an estimated image point of wp01.
+        opt_ip = np.dot(opt_H, hom_src) # an estimated image point of wp01.
+
+        cv2_E = np.linalg.norm(ip[n]-(cv2_ip/cv2_ip[2])[:-1])
+        opt_E = np.linalg.norm(ip[n]-(opt_ip/opt_ip[2])[:-1])
+
+        Errs[n] = (cv2_E, opt_E)
+
+    return Errs
+
 if __name__ == '__main__':
 
     # Defining the dimensions of checkerboard.
@@ -311,32 +356,69 @@ if __name__ == '__main__':
     #h, w = raw_img.shape[:2]
     #print(h,w)
 
-    H = estimate_homography(wps[0], ips[0])
-    opt_H = refine_homography(H, wps[0], ips[0])
+    #H = estimate_homography(wps[0], ips[0])
+    #opt_H, numJ = refine_homography(H, wps[0], ips[0])
 
-    print(H/H[2,2])
-    print(opt_H)
+    #print(H/H[2,2])
+    #print(opt_H)
+
+    #J = jac(H.reshape(-1), wps[0])
+
+    Hs = get_homographies(wps, ips)
+
+    Errs0 = homography_compare(wps[0], ips[0])
+    #cv2_E1, opt_E1 = homography_compare(wps[1], ips[1])
+
+    #print(cv2_E0, opt_E0)
+    #print(cv2_E1, opt_E1)
+
+    """
+    opt_H0 = Hs[0]
+    opt_H1 = Hs[1]
+    opt_H2 = Hs[2]
 
     ret, intr, dist, rvecs, tvecs = cv2.calibrateCamera(wps, ips, (h_npixels, w_npixels), None, None)
+    cv2_H0, status = cv2.findHomography(wps[0], ips[0])
+    cv2_H1, status = cv2.findHomography(wps[1], ips[1])
+    cv2_H2, status = cv2.findHomography(wps[2], ips[2])
 
     r = R.from_mrp(np.squeeze(rvecs[0]))
     rot = r.as_matrix()
     extr = np.zeros((3,3), dtype=np.float32)
     extr[:,:2] = rot[:,:2]
     extr[:,2] = np.squeeze(tvecs[0])
+    cv2_H0 = np.dot(intr,extr)
+    cv2_H0 /= cv2_H0[2,2]
 
-    #print(np.dot(intr,extr))
+    wp01 = wps[0][1].copy() # a second point in the first image.
+    wp01[2] = 1 # conversion to homogeneous coordinates.
 
-    wp1 = wps[0][1].copy() # a second point in the first image.
-    wp1[2] = 1 # conversion to homogeneous coordinates.
+    wp11 = wps[1][1].copy() # a second point in the second image.
+    wp11[2] = 1 # conversion to homogeneous coordinates.
 
-    ip1 = np.dot(H, wp1) # an estimated image point of wp1 without scaling factor.
-    print(np.linalg.norm(ips[0][1]-(ip1/ip1[2])[:-1]))
+    wp21 = wps[2][1].copy() # a second point in the third image.
+    wp21[2] = 1 # conversion to homogeneous coordinates.
 
-    ip1 = np.dot(opt_H, wp1) # an estimated image point of wp1 without scaling factor.
-    print(np.linalg.norm(ips[0][1]-(ip1/ip1[2])[:-1]))
+    opt_ip01 = np.dot(opt_H0, wp01) # an estimated image point of wp01.
+    opt_ip11 = np.dot(opt_H1, wp11) # an estimated image point of wp11.
+    opt_ip21 = np.dot(opt_H2, wp21) # an estimated image point of wp21.
 
-    """
+    cv2_ip01 = np.dot(cv2_H0, wp01) # an estimated image point of wp01.
+    cv2_ip11 = np.dot(cv2_H1, wp11) # an estimated image point of wp11.
+    cv2_ip21 = np.dot(cv2_H2, wp21) # an estimated image point of wp21.
+
+    cv2_E01 = np.linalg.norm(ips[0][1]-(cv2_ip01/cv2_ip01[2])[:-1])
+    cv2_E11 = np.linalg.norm(ips[1][1]-(cv2_ip11/cv2_ip11[2])[:-1])
+    cv2_E21 = np.linalg.norm(ips[2][1]-(cv2_ip21/cv2_ip21[2])[:-1])
+
+    opt_E01 = np.linalg.norm(ips[0][1]-(opt_ip01/opt_ip01[2])[:-1])
+    opt_E11 = np.linalg.norm(ips[1][1]-(opt_ip11/opt_ip11[2])[:-1])
+    opt_E21 = np.linalg.norm(ips[2][1]-(opt_ip21/opt_ip21[2])[:-1])
+
+    print(cv2_E01, opt_E01)
+    print(cv2_E11, opt_E11)
+    print(cv2_E21, opt_E21)
+
     print("dist : \n")
     print(dist)
     print("rvecs : \n")
