@@ -344,7 +344,148 @@ def homography_compare(wp, ip):
 
         Errs[n] = (cv2_E, opt_E)
 
-    return Errs, cv2_ip, opt_ip
+    return Errs, cv2_ip, opt_ip, cv2_H, opt_H
+
+def get_camera_intrinsic(Hs, gamma=True):
+    """Using Zhang's technique, obtain the intrinsic parameters of a camera.
+
+    Parameters
+    ----------
+
+    Returns
+    -------
+    A: ndarray
+        A 3x3 ndarray.
+    """
+
+    M = len(Hs) # The number of images.
+    A = np.zeros((3,3), dtype=np.float64)
+    V = np.zeros((2*M,6), dtype=np.float64)
+    for m, H in enumerate(Hs):
+
+        V[2*m  ] = vpq(H,0,1)
+        V[2*m+1] = vpq(H,0,0) - vpq(H,1,1)
+
+    U, S, Vh = np.linalg.svd(V)
+    b = Vh[np.argmin(S)]
+
+    (B0, B1, B2, B3, B4, B5) = b
+    if gamma is False: B1 = 0
+
+    w = B0*B2*B5 - B5*B1**2 - B0*B4**2 + 2*B1*B3*B4 - B2*B3**2
+    d = B0*B2 - B1**2
+    alpha = np.sqrt(w/(d*B0))
+    beta = np.sqrt(w*B0/(d**2))
+    gamma = B1*np.sqrt(w/(B0*d**2))
+    uc = (B1*B4 - B2*B3)/d
+    vc = (B1*B3 - B0*B4)/d
+
+    """
+    else:
+
+        V = np.zeros((2*M,5), dtype=np.float64)
+        for m, H in enumerate(Hs):
+
+            V[2*m  ] = vpq(H,0,1,gamma)
+            V[2*m+1] = vpq(H,0,0,gamma) - vpq(H,1,1,gamma)
+
+        U, S, Vh = np.linalg.svd(V)
+        b = Vh[np.argmin(S)]
+
+        (B0, B2, B3, B4, B5) = b
+        #if gamma is False: B1 = 0
+
+        w = B0*B2*B5 - B0*B4**2 - B2*B3**2
+        d = B0*B2
+        alpha = np.sqrt(w/(d*B0))
+        beta = np.sqrt(w*B0/(d**2))
+        gamma = 0
+        uc = (-B2*B3)/d
+        vc = (-B0*B4)/d
+    """
+
+    A[0,0] = alpha
+    A[0,1] = gamma
+    A[0,2] = uc
+    A[1,1] = beta
+    A[1,2] = vc
+    A[2,2] = 1
+
+    return A
+
+def vpq(H, p, q):
+
+    v = np.zeros(6, dtype=np.float64)
+    v[0] = H[0,p]*H[0,q]
+    v[1] = H[0,p]*H[1,q] + H[1,p]*H[0,q]
+    v[2] = H[1,p]*H[1,q]
+    v[3] = H[2,p]*H[0,q] + H[0,p]*H[2,q]
+    v[4] = H[2,p]*H[1,q] + H[1,p]*H[2,q]
+    v[5] = H[2,p]*H[2,q]
+
+    return v
+
+def get_extrinsics(A, Hs):
+
+    M = len(Hs) # The number of images.
+    Ws = []
+    Rs = []
+    Ts = []
+    W = np.zeros((3,4), dtype=np.float64)
+
+    for m, H in enumerate(Hs):
+
+        W, R, T = estimate_view_transform(A,H)
+        Ws.append(W)
+        Rs.append(R)
+        Ts.append(T)
+
+    return Ws, Rs, Ts
+
+def estimate_view_transform(A,H):
+
+    h0 = H[:,0] 
+    h1 = H[:,1] 
+    h2 = H[:,2] 
+    
+    Q = np.zeros((3,3), dtype=np.float64)
+
+    invA = np.linalg.inv(A)
+    invAh0 = np.dot(invA, h0)
+    invAh1 = np.dot(invA, h1)
+    invAh2 = np.dot(invA, h2)
+
+    kappa = 1/np.linalg.norm(invAh0)
+    r0 = kappa * invAh0
+    r1 = kappa * invAh1
+    r2 = np.cross(r0, r1)
+    T = kappa * invAh2
+
+    Q[:,0] = r0
+    Q[:,1] = r1
+    Q[:,2] = r2
+
+    U, S ,Vh = np.linalg.svd(Q)
+    R = np.dot(U, Vh)
+
+    W = np.concatenate((R,T[:,None]), axis=1)
+
+    return W, R, T
+
+def to_rotation_matrix(rho):
+
+    rho = np.squeeze(rho)
+    theta = np.linalg.norm(rho)
+    rhohat = rho / theta
+
+    W = np.zeros((3,3), dtype=np.float64)
+    W[0] = (0, -rhohat[0], rhohat[1])
+    W[1] = (rhohat[2], 0, -rhohat[0])
+    W[2] = (-rhohat[1], rhohat[0], 0)
+
+    R = np.identity(3) + W*np.sin(theta) + np.dot(W, W) * (1-np.cos(theta))
+
+    return R
 
 if __name__ == '__main__':
 
@@ -365,26 +506,33 @@ if __name__ == '__main__':
 
     Hs = get_homographies(wps, ips)
 
-    Errs0, cv2_ip0, opt_ip0 = homography_compare(wps[0], ips[0])
+    Errs0, cv2_ip0, opt_ip0, cv2_H0, opt_H0 = homography_compare(wps[0], ips[0])
 
     df = pd.DataFrame(Errs0, columns=['opencv', 'mine'])
-    print(df)
     ax = df.plot(style=['-', 'o'])
     ax.set_xlabel('Corner number')
     ax.set_ylabel(r'$\|\|e\|\|$')
-    ax.get_figure().savefig('error.png')
+    ax.get_figure().savefig('error.png', bbox_inches='tight')
+
+    #A_gam0 = get_camera_intrinsic(Hs, gamma=False)
+    #Ws_gam0, Rs_gam0, Ts_gam0 = get_extrinsics(A_gam0, Hs)
+    #print(Rs_gam0[0])
+
+    A = get_camera_intrinsic(Hs, gamma=True)
+    Ws, Rs, Ts = get_extrinsics(A, Hs)
+    print(Ws[0])
+    np.savetxt('my_extr.txt', Ws[0])
     
-    """
     ret, intr, dist, rvecs, tvecs = cv2.calibrateCamera(wps, ips, (h_npixels, w_npixels), None, None)
+    rot_cv, jac_rot = cv2.Rodrigues(rvecs[0])
+    print(rot_cv)
+    print(tvecs[0])
+    np.savetxt('cv2_rot.txt', rot_cv)
 
-    r = R.from_mrp(np.squeeze(rvecs[0]))
-    rot = r.as_matrix()
-    extr = np.zeros((3,3), dtype=np.float32)
-    extr[:,:2] = rot[:,:2]
-    extr[:,2] = np.squeeze(tvecs[0])
-    cv2_H0 = np.dot(intr,extr)
-    cv2_H0 /= cv2_H0[2,2]
+    #print(cv2_H0)
+    #print(Hs[0])
 
+    """
     print("dist : \n")
     print(dist)
     print("rvecs : \n")
