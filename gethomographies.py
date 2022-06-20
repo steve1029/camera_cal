@@ -18,15 +18,15 @@ def get_world_points(CHECKERBOARD, raw_dir, save_dir):
     # Creating vector to store vectors of the 3D world points for each checkerboard image.
     # Unit: centimeter.
     # (w, h, k) order. Note that all k=0.
-    wps = []
-    wp = np.zeros((CHECKERBOARD[0] * CHECKERBOARD[1], 3), np.float32)
-    wp[:,:2] = np.mgrid[0:CHECKERBOARD[0], 0:CHECKERBOARD[1]].T.reshape(-1, 2) 
+    Mwps = []
+    wps = np.zeros((CHECKERBOARD[0] * CHECKERBOARD[1], 3), np.float32)
+    wps[:,:2] = np.mgrid[0:CHECKERBOARD[0], 0:CHECKERBOARD[1]].T.reshape(-1, 2) 
 
-    #print(wp)
+    #print(wps)
 
     # Creating vector to store vectors of the 2D sensor points for each checkerboard image.
     # Note that this vector lies in the sensor coordinates, not the image plane.
-    ips = [] # findChessboardCornersSB()
+    Mips = [] # findChessboardCornersSB()
 
     # Extracting path of individual image stored in a given directory
     if os.path.exists(save_dir) is False: os.makedirs(dir)
@@ -57,9 +57,9 @@ def get_world_points(CHECKERBOARD, raw_dir, save_dir):
             #cv2.imwrite(f'{strategy3_dir}{fname}', img)
 
             fnames_found.append(fname)
-            wps.append(wp)
-            #ips.append(corners)
-            ips.append(np.squeeze(corners))
+            Mwps.append(wps)
+            #Mips.append(corners)
+            Mips.append(np.squeeze(corners))
 
         else: 
             #raise ValueError(f"The corner of {fname} is not found.")
@@ -68,32 +68,32 @@ def get_world_points(CHECKERBOARD, raw_dir, save_dir):
 
     (h, w) = gray.shape[::-1]
 
-    return wps, ips, fnames_found, (h,w)
+    return Mwps, Mips, fnames_found, (h,w)
 
-def get_homographies(wps, ips):
+def get_homographies(Mwps, Mips):
 
-    M = len(wps) # The number of the views, i.e. the images.
+    M = len(Mwps) # The number of the views, i.e. the images.
     Hs = []
 
-    for m, (wp, ip) in enumerate(zip(wps,ips)):
+    for m, (wps, ips) in enumerate(zip(Mwps,Mips)):
 
-        H_init = estimate_homography(wp, ip)
-        opt_H, jac = refine_homography(H_init, wp, ip)
+        H_init = estimate_homography(wps, ips)
+        opt_H, jac = refine_homography(H_init, wps, ips)
         Hs.append(opt_H)
 
     return Hs
 
-def estimate_homography(wp, ip):
+def estimate_homography(wps, ips):
     """Estimate the homography matrix for each image
 
     Parameters
     ----------
-    wps: a list.
+    Mwps: a list.
         a list of 2D arrays. a world points of the chessboard corners.
         Note that in Zhang's technique, Z is omitted for the world coordinates
         because Z=0 for all chessboard corners.
 
-    ips: a list.
+    Mips: a list.
         a list of 2D vectors, an observed sensor points in an images.
 
     Returns
@@ -102,13 +102,13 @@ def estimate_homography(wp, ip):
         3x3 ndarray. A homography matrix of an image.
     """
 
-    N = wp.shape[0] # The number of points in an image.
-    Np = get_normalization_matrix(wp)
-    Nq = get_normalization_matrix(ip)
+    N = wps.shape[0] # The number of points in an image.
+    Np = get_normalization_matrix(wps)
+    Nq = get_normalization_matrix(ips)
     M = np.zeros((2*N,9), dtype=np.float32)
 
-    homwp = wp.copy()
-    homip = ip.copy()
+    homwp = wps.copy()
+    homip = ips.copy()
 
     homwp[:,2] = 1
     homip = np.append(homip, np.ones((54,1)), axis=1)
@@ -209,7 +209,7 @@ def get_normalization_matrix(Xs):
 
     return NM
 
-def refine_homography(H, wp, ip):
+def refine_homography(H, wps, ips):
     """
     Returns
     -------
@@ -217,19 +217,19 @@ def refine_homography(H, wp, ip):
         3x3 homography matrix. Numerically optimized.
     """
 
-    N = wp.shape[0] # The number of corners.
+    N = wps.shape[0] # The number of corners.
 
     M = np.zeros(2*N, dtype=np.float64) # observed corner locations, in sensor coordinate.
 
-    for j, q in enumerate(ip):
+    for j, q in enumerate(ips):
 
         M[2*j  ] = q[0]
         M[2*j+1] = q[1]
 
     h = H.reshape(-1)
 
-    result = spo.least_squares(residuals, h, method='lm', args=(M, wp))
-    #result = spo.leastsq(residuals, h, args=(M, wp)) # MINPACK wrapper.
+    result = spo.least_squares(residuals, h, method='lm', args=(M, wps))
+    #result = spo.leastsq(residuals, h, args=(M, wps)) # MINPACK wrapper.
 
     # return the optimized homography.
     hh = result.x
@@ -241,21 +241,21 @@ def refine_homography(H, wp, ip):
 
     return hh, J
 
-def residuals(h, M, wp):
+def residuals(h, M, wps):
 
-    Y = value(wp, h) # the estimated corner locations for an image, in sensor coordinate.
+    Y = value(wps, h) # the estimated corner locations for an image, in sensor coordinate.
     E = M - Y # a function to minimize.
     
     return E
 
-def value(wp, h):
+def value(wps, h):
     """Estimate the coordinate of the image points that lies in the sensor coordinate.
 
     Parameters
     ----------
-    wp: ndarray.
+    wps: ndarray.
         An 2D array containing an 3D vector coordinate in each row. 
-        ex) wp[j] = np.array([x,y,z]).
+        ex) wps[j] = np.array([x,y,z]).
 
     h: ndarray.
         A flattened homography matrix.
@@ -269,13 +269,13 @@ def value(wp, h):
         where Z=0.
     """
 
-    N = wp.shape[0] # The number of corners.
+    N = wps.shape[0] # The number of corners.
     Y = np.zeros(2*N, np.float64)
 
     for j in range(N):
 
         # (x,y,z) is the world coordinate.
-        (x,y,z) = wp[j]
+        (x,y,z) = wps[j]
 
         w = h[6]*x + h[7]*y + h[8]
         u = (h[0]*x + h[1]*y + h[2]) / w
@@ -286,23 +286,23 @@ def value(wp, h):
 
     return Y
 
-def jac(h, wp):
+def jac(h, wps):
     """Get Jacobian matrix of size 2N x 9 where N is the number of corners.
     
     Parameters
     ----------
-    wp: ndarray.
+    wps: ndarray.
         An 2D array containing an 3D vector coordinate in each row. 
-        ex) wp[j] = np.array([x,y,z]).
+        ex) wps[j] = np.array([x,y,z]).
 
     h: ndarray.
         A flattened homography matrix.
     """
 
-    N = wp.shape[0] # The number of corners.
+    N = wps.shape[0] # The number of corners.
     J = np.zeros((2*N,9), np.float64)
 
-    for j, p in enumerate(wp):
+    for j, p in enumerate(wps):
         (X,Y,Z) = p
         sx = h[0]*X + h[1]*Y + h[2]
         sy = h[3]*X + h[4]*Y + h[5]
@@ -313,22 +313,22 @@ def jac(h, wp):
 
     return J
 
-def homography_compare(wp, ip):
+def homography_compare(wps, ips, answer):
 
     # The homography obtained by using built-in function in OpenCV.
-    cv2_H, status = cv2.findHomography(wp, ip)
+    cv2_H, status = cv2.findHomography(wps, ips)
 
     # The homography optained by me.
-    H_init = estimate_homography(wp, ip)
-    opt_H, J = refine_homography(H_init, wp, ip)
+    H_init = estimate_homography(wps, ips)
+    opt_H, J = refine_homography(H_init, wps, ips)
 
-    N = wp.shape[0] # The number of corners.
+    N = wps.shape[0] # The number of corners.
 
     Errs = np.zeros((N,2), dtype=np.float64)
     cv2_ip = np.zeros((N,2), dtype=np.float64)
     opt_ip = np.zeros((N,2), dtype=np.float64)
 
-    for n, (src, dst) in enumerate(zip(wp,ip)):
+    for n, (src, dst) in enumerate(zip(wps,ips)):
 
         hom_src = src.copy() # a second point in the first image.
         hom_src[2] = 1 # conversion to homogeneous coordinates.
@@ -336,8 +336,8 @@ def homography_compare(wp, ip):
         cv2_dst = np.dot(cv2_H, hom_src) # an estimated image point of wp01.
         opt_dst = np.dot(opt_H, hom_src) # an estimated image point of wp01.
 
-        cv2_E = np.linalg.norm(dst-(cv2_dst/cv2_dst[2])[:-1])
-        opt_E = np.linalg.norm(dst-(opt_dst/opt_dst[2])[:-1])
+        cv2_E = np.linalg.norm(answer[n]-(cv2_dst/cv2_dst[2])[:-1])
+        opt_E = np.linalg.norm(answer[n]-(opt_dst/opt_dst[2])[:-1])
 
         cv2_ip[n] = (cv2_dst/cv2_dst[2])[:-1]
         opt_ip[n] = (opt_dst/opt_dst[2])[:-1]
@@ -380,30 +380,6 @@ def get_camera_intrinsic(Hs, gamma=True):
     uc = (B1*B4 - B2*B3)/d
     vc = (B1*B3 - B0*B4)/d
 
-    """
-    else:
-
-        V = np.zeros((2*M,5), dtype=np.float64)
-        for m, H in enumerate(Hs):
-
-            V[2*m  ] = vpq(H,0,1,gamma)
-            V[2*m+1] = vpq(H,0,0,gamma) - vpq(H,1,1,gamma)
-
-        U, S, Vh = np.linalg.svd(V)
-        b = Vh[np.argmin(S)]
-
-        (B0, B2, B3, B4, B5) = b
-        #if gamma is False: B1 = 0
-
-        w = B0*B2*B5 - B0*B4**2 - B2*B3**2
-        d = B0*B2
-        alpha = np.sqrt(w/(d*B0))
-        beta = np.sqrt(w*B0/(d**2))
-        gamma = 0
-        uc = (-B2*B3)/d
-        vc = (-B0*B4)/d
-    """
-
     A[0,0] = alpha
     A[0,1] = gamma
     A[0,2] = uc
@@ -431,16 +407,18 @@ def get_extrinsics(A, Hs):
     Ws = []
     Rs = []
     Ts = []
+    hom_Ws = []
     W = np.zeros((3,4), dtype=np.float64)
 
     for m, H in enumerate(Hs):
 
-        W, R, T = estimate_view_transform(A,H)
+        W, R, T, hom_W = estimate_view_transform(A,H)
         Ws.append(W)
         Rs.append(R)
         Ts.append(T)
+        hom_Ws.append(hom_W)
 
-    return Ws, Rs, Ts
+    return Ws, Rs, Ts, hom_Ws
 
 def estimate_view_transform(A,H):
 
@@ -469,8 +447,9 @@ def estimate_view_transform(A,H):
     R = np.dot(U, Vh)
 
     W = np.concatenate((R,T[:,None]), axis=1)
+    hom_W = np.concatenate((R[:,:2],T[:,None]), axis=1)
 
-    return W, R, T
+    return W, R, T, hom_W
 
 def to_rotation_matrix(rho):
 
@@ -487,6 +466,91 @@ def to_rotation_matrix(rho):
 
     return R
 
+def get_undistorted_corners(raw_dir, CHECKERBOARD, intr, dist, save=False):
+
+    h, w = CHECKERBOARD
+    undist_corners = {} 
+    fnames_raw = os.listdir(raw_dir)
+
+    # Using the derived camera parameters to undistort the image
+    for fname in fnames_raw:
+
+        img = cv2.imread(raw_dir+fname)
+        # Refining the camera matrix using parameters obtained by calibration
+        #newcameramtx, roi = cv2.getOptimalNewCameraMatrix(intr, dist, (w, h), 1, (w, h))
+
+        # Method 1 to undistort the image
+        #dst = cv2.undistort(img, intr, dist, None, newcameramtx)
+        dst = cv2.undistort(img, intr, dist, None, intr)
+
+        # Method 2 to undistort the image
+        #mapx, mapy = cv2.initUndistortRectifyMap(intr, dist, None, newcameramtx, (w, h), 5)
+        #dst = cv2.remap(img, mapx, mapy, cv2.INTER_LINEAR)
+
+        # Displaying the undistorted image
+        #cv2.imshow("undistorted image", dst)
+        #cv2.waitKey(0)
+
+        gray = cv2.cvtColor(dst, cv2.COLOR_BGR2GRAY)
+
+        ret, corners = cv2.findChessboardCornersSB(gray, CHECKERBOARD, \
+            cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_FAST_CHECK\
+            + cv2.CALIB_CB_NORMALIZE_IMAGE)
+
+        undist_corners[fname] = np.squeeze(corners)
+        # Save the undistorted image.
+        if save is True: 
+            undist_dir = './images_undistorted_corners/'
+            img = cv2.drawChessboardCorners(dst, CHECKERBOARD, corners, ret)
+            cv2.imwrite(f'{undist_dir}{fname}', img)
+
+    return undist_corners
+
+def estimate_lens_distortion(intr, Mextr, Mwps, Mips):
+
+    M = len(Mwps) # The number of views.
+    N = Mwps[0].shape[0] # The number of points.
+
+    uc = intr[0,2]
+    vc = intr[1,2]
+
+    D = np.zeros((2*M*N, 2), dtype=np.float64)
+    d = np.zeros(2*M*N, dtype=np.float64)
+    l = 0
+
+    for m, (wps, ips) in enumerate(zip(Mwps,Mips)):
+
+        for j in range(N):
+
+            ansx, ansy = normalized_projection(Mextr[m], wps[j])
+            r = np.sqrt(ansx**2 + ansy**2)
+            u, v = normalized_to_sensor_projection(intr, (ansx, ansy))
+            du, dv = u-uc, v-vc
+            D[2*l]
+
+    return
+
+def normalized_projection(W, wp):
+
+    hom_wp = np.ones(4, dtype=np.float64)
+    hom_wp[0:4] = wp
+
+    vec = np.dot(W, hom_wp)
+    vec /= vec[2]
+
+    (x, y) = vec[0:2]
+
+    return (x,y)
+
+def normalized_to_sensor_projection(intr, normcoor):
+
+    hom_normcoor = np.zeros(3, dtype=np.float64)
+    hom_normcoor[:2] = normcoor
+
+    (u,v) = np.dot(intr[:2], hom_normcoor)
+
+    return (u,v)
+
 if __name__ == '__main__':
 
     # Defining the dimensions of checkerboard.
@@ -496,41 +560,32 @@ if __name__ == '__main__':
     raw_dir = './images_raw/'
     save_dir = './strategy3/'
 
-    wps, ips, fnames, (h_npixels, w_npixels) = get_world_points(CHECKERBOARD, raw_dir, save_dir)
+    Mwps, Mips, fnames, (h_npixels, w_npixels) = get_world_points(CHECKERBOARD, raw_dir, save_dir)
 
-    #print(fnames_found[0])
-    #print(ips[0].shape)
-    #print(np.squeeze(ips[0]))
-    #h, w = raw_img.shape[:2]
-    #print(h,w)
-
-    Hs = get_homographies(wps, ips)
-
-    Errs0, cv2_ip0, opt_ip0, cv2_H0, opt_H0 = homography_compare(wps[0], ips[0])
-
-    df = pd.DataFrame(Errs0, columns=['opencv', 'mine'])
-    ax = df.plot(style=['-', 'o'])
-    ax.set_xlabel('Corner number')
-    ax.set_ylabel(r'$\|\|e\|\|$')
-    ax.get_figure().savefig('error.png', bbox_inches='tight')
+    Hs = get_homographies(Mwps, Mips)
 
     #A_gam0 = get_camera_intrinsic(Hs, gamma=False)
     #Ws_gam0, Rs_gam0, Ts_gam0 = get_extrinsics(A_gam0, Hs)
     #print(Rs_gam0[0])
 
     A = get_camera_intrinsic(Hs, gamma=True)
-    Ws, Rs, Ts = get_extrinsics(A, Hs)
-    print(Ws[0])
-    np.savetxt('my_extr.txt', Ws[0])
+    Ws, Rs, Ts, hom_Ws = get_extrinsics(A, Hs)
+    recon_H = np.dot(A,hom_Ws[0])
+    recon_H /= recon_H[2,2]
     
-    ret, intr, dist, rvecs, tvecs = cv2.calibrateCamera(wps, ips, (h_npixels, w_npixels), None, None)
+    ret, intr, dist, rvecs, tvecs = cv2.calibrateCamera(Mwps, Mips, (h_npixels, w_npixels), None, None)
     rot_cv, jac_rot = cv2.Rodrigues(rvecs[0])
-    print(rot_cv)
-    print(tvecs[0])
-    np.savetxt('cv2_rot.txt', rot_cv)
 
-    #print(cv2_H0)
-    #print(Hs[0])
+    undist_corners = get_undistorted_corners(raw_dir, CHECKERBOARD, intr, dist, save=True)
+
+    Errs0, cv2_ip0, opt_ip0, cv2_H0, opt_H0 = homography_compare(Mwps[0], Mips[0], undist_corners['image_10.jpg'])
+    Errs1, cv2_ip1, opt_ip1, cv2_H1, opt_H1 = homography_compare(Mwps[1], Mips[1],undist_corners['image_11.jpg'])
+
+    df = pd.DataFrame(Errs0, columns=['opencv', 'mine'])
+    ax = df.plot(style=['-', 'o'])
+    ax.set_xlabel('Corner number')
+    ax.set_ylabel(r'$\|\|e\|\|^2$')
+    ax.get_figure().savefig('error.png', bbox_inches='tight')
 
     """
     print("dist : \n")
@@ -542,25 +597,3 @@ if __name__ == '__main__':
     """
 
     cv2.destroyAllWindows()
-    sys.exit()
-
-    # Using the derived camera parameters to undistort the image
-    for fname in fnames_raw:
-
-        img = cv2.imread(raw_dir+fname)
-        # Refining the camera matrix using parameters obtained by calibration
-        newcameramtx, roi = cv2.getOptimalNewCameraMatrix(mtx, dist, (w, h), 1, (w, h))
-
-        # Method 1 to undistort the image
-        dst = cv2.undistort(img, mtx, dist, None, newcameramtx)
-
-        # Method 2 to undistort the image
-        #mapx, mapy = cv2.initUndistortRectifyMap(mtx, dist, None, newcameramtx, (w, h), 5)
-        #dst = cv2.remap(img, mapx, mapy, cv2.INTER_LINEAR)
-
-        # Displaying the undistorted image
-        #cv2.imshow("undistorted image", dst)
-        #cv2.waitKey(0)
-
-        # Save the undistorted image.
-        cv2.imwrite(f'{undist_dir}{fname}', dst)

@@ -115,6 +115,8 @@ print(tvecs)
 
 # Using the derived camera parameters to undistort the image
 
+undist_corners = []
+
 for fname in fnames_raw:
 
     img = cv2.imread(raw_dir+fname)
@@ -132,5 +134,13 @@ for fname in fnames_raw:
     #cv2.imshow("undistorted image", dst)
     #cv2.waitKey(0)
 
+    gray = cv2.cvtColor(dst, cv2.COLOR_BGR2GRAY)
+
+    ret, corners = cv2.findChessboardCornersSB(gray, CHECKERBOARD, \
+        cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_FAST_CHECK\
+        + cv2.CALIB_CB_NORMALIZE_IMAGE)
+
+    undist_corners.append(corners)
+
     # Save the undistorted image.
-    cv2.imwrite(f'{undist_dir}{fname}', dst)
+    #cv2.imwrite(f'{undist_dir}{fname}', dst)
