@@ -243,12 +243,12 @@ def refine_homography(H, wps, ips):
 
 def residuals(h, M, wps):
 
-    Y = value(wps, h) # the estimated corner locations for an image, in sensor coordinate.
+    Y = value_h(wps, h) # the estimated corner locations for an image, in sensor coordinate.
     E = M - Y # a function to minimize.
     
     return E
 
-def value(wps, h):
+def value_h(wps, h):
     """Estimate the coordinate of the image points that lies in the sensor coordinate.
 
     Parameters
@@ -286,7 +286,7 @@ def value(wps, h):
 
     return Y
 
-def jac(h, wps):
+def jac_h(h, wps):
     """Get Jacobian matrix of size 2N x 9 where N is the number of corners.
     
     Parameters
@@ -451,21 +451,6 @@ def estimate_view_transform(A,H):
 
     return W, R, T, hom_W
 
-def to_rotation_matrix(rho):
-
-    rho = np.squeeze(rho)
-    theta = np.linalg.norm(rho)
-    rhohat = rho / theta
-
-    W = np.zeros((3,3), dtype=np.float64)
-    W[0] = (0, -rhohat[0], rhohat[1])
-    W[1] = (rhohat[2], 0, -rhohat[0])
-    W[2] = (-rhohat[1], rhohat[0], 0)
-
-    R = np.identity(3) + W*np.sin(theta) + np.dot(W, W) * (1-np.cos(theta))
-
-    return R
-
 def get_undistorted_corners(raw_dir, CHECKERBOARD, intr, dist, save=False):
 
     h, w = CHECKERBOARD
@@ -526,14 +511,23 @@ def estimate_lens_distortion(intr, Mextr, Mwps, Mips):
             r = np.sqrt(ansx**2 + ansy**2)
             u, v = normalized_to_sensor_projection(intr, (ansx, ansy))
             du, dv = u-uc, v-vc
-            D[2*l]
+            D[2*l  ] = (du*r**2, du*r**4)
+            D[2*l+1] = (dv*r**2, dv*r**4)
+            udot = ips[j,0]
+            vdot = ips[j,1]
+            d[2*l  ] = udot - u
+            d[2*l+1] = vdot - v
+            l += 1
 
-    return
+    sol = spo.lsq_linear(D, d, lsq_solver='exact')
+    #sol = np.linalg.multi_dot([np.linalg.inv(np.dot(D.T, D)), D.T, d])
+
+    return sol.x
 
 def normalized_projection(W, wp):
 
     hom_wp = np.ones(4, dtype=np.float64)
-    hom_wp[0:4] = wp
+    hom_wp[:3] = wp
 
     vec = np.dot(W, hom_wp)
     vec /= vec[2]
@@ -550,6 +544,129 @@ def normalized_to_sensor_projection(intr, normcoor):
     (u,v) = np.dot(intr[:2], hom_normcoor)
 
     return (u,v)
+
+def refine_all(intr, rdist, Mextr, Mwps, Mips):
+
+    P = compose_parameter_vector(intr, rdist, Mextr)
+    M = len(Mextr)
+    N = len(Mwps[0])
+    X = np.zeros(2*M*N, dtype=np.float64)
+    Y = np.zeros(2*M*N, dtype=np.float64)
+
+    for m, (wps, ips) in enumerate(zip(Mwps,Mips)):
+        for n, (wp,ip) in enumerate(zip(wps, ips)):
+            X[N*m+n  ] = wp[0]
+            X[N*m+n+1] = wp[1]
+            Y[N*m+n  ] = ip[0]
+            Y[N*m+n+1] = ip[1]
+    return
+
+def compose_parameter_vector(intr, rdist, Mextr):
+
+    alpha = intr[0,0]
+    beta = intr[1,0]
+    gamma = intr[0,1]
+    uc = intr[0,2]
+    vc = intr[1,2]
+    k0 = rdist[0]
+    k1 = rdist[1]
+
+    P = np.zeros(7+6*M, dtype=np.float64)
+    P[0:7] = (alpha, beta, gamma, uc, vc, k0, k1)
+    M = len(Mextr)
+
+    for m, w in enumerate(Mextr):
+        R = w[:,:3]
+        t = w[:,3]
+        rho = to_rodrigues_vector(R)
+        P[6*m+7:6*m+13] = (rho[0], rho[1], rho[2], t[0], t[1], t[2])
+
+    return P
+
+def decompose_parameter_vector(P):
+    """Decompose the parameter vector P into
+    the intrinsic, extrinsic and radial distortion parameters.
+
+    Parameters
+    ----------
+    P : a tuple.
+        A parameter vector, (intr, rdist, extr).
+
+    Returns
+    -------
+    intr : a tuple.
+        (alpha, beta, gamma, uc, vc)
+    rdist : a tuple.
+        (k0, k1)
+    Mextr : a list.
+        a list of tuples. 
+        The length of a list is M, the number of views.
+        Each tuple is the extrinsic parameters of the associated view.
+        Each tuple has the form of (rho_x, rho_y, rho_z, t_x, t_y, t_z).
+    """
+    (alpha, beta, gamma, uc, vc, k0, k1) = P[0:7]
+    A = np.zeros((3,3), dtype=np.float64)
+    k = np.array([k0, k1])
+    A[0,0] = alpha
+    A[0,1] = gamma
+    A[0,2] = uc
+    A[1,1] = beta
+    A[1,2] = vc
+    A[2,2] = 1
+
+    M = int((len(P)-7)/6)
+    Ws = []
+
+    for i in range(M):
+        m = 6*i+7
+        rho = np.array([P[m:m+2]])
+        t = np.array([P[m+3:m+5]])
+        R = to_rotation_matrix(rho)
+        W = np.concatenate((R,t[:,None]), axis=1)
+        Ws.append(W)
+
+    return A, k, Ws
+
+def to_rotation_matrix(rho):
+
+    rho = np.squeeze(rho)
+    theta = np.linalg.norm(rho)
+    rhohat = rho / theta
+
+    W = np.zeros((3,3), dtype=np.float64)
+    W[0] = (0, -rhohat[0], rhohat[1])
+    W[1] = (rhohat[2], 0, -rhohat[0])
+    W[2] = (-rhohat[1], rhohat[0], 0)
+
+    R = np.identity(3) + W*np.sin(theta) + np.dot(W, W) * (1-np.cos(theta))
+
+    return R
+
+def to_rodrigues_vector(R):
+    """Conversion from a 3D rotation matrix to the associated Rodrigues vector."""
+
+    p = 0.5 * np.array([R[2,1]-R[1,2], R[0,2]-R[2,0], R[1,0]-R[0,1]])
+    c = 0.5 * (np.trace(R)-1)
+
+    if np.linalg.norm(p) == 0:
+        if c == 1: rho = np.zeros(3, dtype=np.float64)
+        elif c == -1:
+            Rp = R + np.identity(3)
+            arg_max_norm_col = np.argmax(np.linalg.norm(Rp, axis=0))
+            v = Rp[:,arg_max_norm_col]
+            u = v / np.linalg.norm(v)
+            (u0, u1, u2) = u
+            if (u0 < 0) or (u0==0 and u1<0) or (u0==u1==0 or u2<0): u = -u
+            rho = np.pi * u
+        else: raise ValueError("Rodrigues vector cannot be drived due to the wrong rotation matrix.")
+
+    else:
+        normp = np.linalg.norm(p)
+        u = p / normp
+        theta = np.arctan(normp/c)
+        rho = theta * u
+
+    return rho
 
 if __name__ == '__main__':
 
@@ -570,10 +687,15 @@ if __name__ == '__main__':
 
     A = get_camera_intrinsic(Hs, gamma=True)
     Ws, Rs, Ts, hom_Ws = get_extrinsics(A, Hs)
+
+    k = estimate_lens_distortion(A, Ws, Mwps, Mips)
+
+    ret, intr, dist, rvecs, tvecs = cv2.calibrateCamera(Mwps, Mips, (h_npixels, w_npixels), None, None)
+
+    """
     recon_H = np.dot(A,hom_Ws[0])
     recon_H /= recon_H[2,2]
     
-    ret, intr, dist, rvecs, tvecs = cv2.calibrateCamera(Mwps, Mips, (h_npixels, w_npixels), None, None)
     rot_cv, jac_rot = cv2.Rodrigues(rvecs[0])
 
     undist_corners = get_undistorted_corners(raw_dir, CHECKERBOARD, intr, dist, save=True)
@@ -587,7 +709,6 @@ if __name__ == '__main__':
     ax.set_ylabel(r'$\|\|e\|\|^2$')
     ax.get_figure().savefig('error.png', bbox_inches='tight')
 
-    """
     print("dist : \n")
     print(dist)
     print("rvecs : \n")
