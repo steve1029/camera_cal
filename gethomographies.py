@@ -29,7 +29,7 @@ def get_world_points(CHECKERBOARD, raw_dir, save_dir):
     Mips = [] # findChessboardCornersSB()
 
     # Extracting path of individual image stored in a given directory
-    if os.path.exists(save_dir) is False: os.makedirs(dir)
+    if os.path.exists(save_dir) is False: os.makedirs(save_dir)
 
     fnames_raw = os.listdir(raw_dir)
     fnames_found = []
@@ -69,6 +69,42 @@ def get_world_points(CHECKERBOARD, raw_dir, save_dir):
     (h, w) = gray.shape[::-1]
 
     return Mwps, Mips, fnames_found, (h,w)
+
+def calibrate(Mwps, Mips):
+    """Camera Calibration algorithm by Zhang.
+
+    Parameters
+    ----------
+    Mwps: a list
+        A list with M elements. Each element are a 2D array.
+        Each row in an 2D array represents the world coordinate, i.e., (X,Y,Z) of a corner.
+        There are M images and each has N corners.
+        Thus, len(Mwps)=M and Mwps[k].shape = (N,3) where k is an integer 0<k<N-1.
+
+    Mips: a list
+        The associated observed coordinate of each corners, i.e., (u,v) of a corner, in the normalized image frame.
+        len(Mips)=M and Mips[k].shape = (N,2) where k is an integer 0<k<N-1.
+
+    Returns
+    -------
+    opt_intr: ndarray
+        optimized intrinsic parameters.
+
+    opt_rdist: tuple
+        optimized radial distortion parameters.
+
+    opt_Mexpr: list
+        optimized extrinsic parameters for each M images.
+    """
+
+    MH = get_homographies(Mwps, Mips) # M homography matrice.
+    intr = get_camera_intrinsic(MH, gamma=1) # intrinsic paramters.
+    Mextr, Mrvec, Mtvecs, Mextr_z0  = get_extrinsics(intr, MH) # M extrinsic parameters for associated M images.
+    rdist = estimate_lens_distortion(intr, Mextr, Mwps, Mips) # radial distortion parameters, i.e., (k0, k1).
+
+    opt_intr, opt_rdist, opt_Mexpr = refine_all(intr, rdist, Mextr, Mwps, Mips)
+
+    return opt_intr, opt_rdist, opt_Mexpr
 
 def get_homographies(Mwps, Mips):
 
@@ -228,7 +264,7 @@ def refine_homography(H, wps, ips):
 
     h = H.reshape(-1)
 
-    result = spo.least_squares(residuals, h, method='lm', args=(M, wps))
+    result = spo.least_squares(residuals_h, h, method='lm', args=(M, wps))
     #result = spo.leastsq(residuals, h, args=(M, wps)) # MINPACK wrapper.
 
     # return the optimized homography.
@@ -241,7 +277,7 @@ def refine_homography(H, wps, ips):
 
     return hh, J
 
-def residuals(h, M, wps):
+def residuals_h(h, M, wps):
 
     Y = value_h(wps, h) # the estimated corner locations for an image, in sensor coordinate.
     E = M - Y # a function to minimize.
@@ -346,11 +382,13 @@ def homography_compare(wps, ips, answer):
 
     return Errs, cv2_ip, opt_ip, cv2_H, opt_H
 
-def get_camera_intrinsic(Hs, gamma=True):
+def get_camera_intrinsic(MH, gamma=0):
     """Using Zhang's technique, obtain the intrinsic parameters of a camera.
 
     Parameters
     ----------
+    MH: list
+        a list of homographies.
 
     Returns
     -------
@@ -358,19 +396,19 @@ def get_camera_intrinsic(Hs, gamma=True):
         A 3x3 ndarray.
     """
 
-    M = len(Hs) # The number of images.
+    M = len(MH) # The number of images.
     A = np.zeros((3,3), dtype=np.float64)
     V = np.zeros((2*M,6), dtype=np.float64)
-    for m, H in enumerate(Hs):
 
+    for m, H in enumerate(MH):
         V[2*m  ] = vpq(H,0,1)
         V[2*m+1] = vpq(H,0,0) - vpq(H,1,1)
 
     U, S, Vh = np.linalg.svd(V)
-    b = Vh[np.argmin(S)]
+    b = Vh[-1,:]
 
     (B0, B1, B2, B3, B4, B5) = b
-    if gamma is False: B1 = 0
+    if gamma == 0: B1 = 0
 
     w = B0*B2*B5 - B5*B1**2 - B0*B4**2 + 2*B1*B3*B4 - B2*B3**2
     d = B0*B2 - B1**2
@@ -401,24 +439,47 @@ def vpq(H, p, q):
 
     return v
 
-def get_extrinsics(A, Hs):
+def get_extrinsics(intr, MH):
+    """Get extrinsic parameters by using the intrinsic parameters and homographies.
 
-    M = len(Hs) # The number of images.
+    Parameters
+    ----------
+    intr: ndarray
+        a 3x3 intrinsic parameters.
+
+    MH: list
+        a list of the homography matrice.
+
+    Returns
+    -------
+    Ws: list
+
+    Rs: list
+
+    Ts: list
+
+    Ws_z0: list
+        a list of 3x3 ndarrays. Each ndarray has the form of (r1, r2, t),
+        where r1,r2 and t are the column vectors.
+        In Zhang's technique, since the world coordinate of the corners are fixed to z=0,
+        r3 vectors are usually omitted.
+    """
+
     Ws = []
     Rs = []
     Ts = []
-    hom_Ws = []
+    Ws_z0 = []
     W = np.zeros((3,4), dtype=np.float64)
 
-    for m, H in enumerate(Hs):
+    for m, H in enumerate(MH):
 
-        W, R, T, hom_W = estimate_view_transform(A,H)
+        W, R, T, W_z0 = estimate_view_transform(intr,H)
         Ws.append(W)
         Rs.append(R)
         Ts.append(T)
-        hom_Ws.append(hom_W)
+        Ws_z0.append(W_z0)
 
-    return Ws, Rs, Ts, hom_Ws
+    return Ws, Rs, Ts, Ws_z0
 
 def estimate_view_transform(A,H):
 
@@ -447,49 +508,9 @@ def estimate_view_transform(A,H):
     R = np.dot(U, Vh)
 
     W = np.concatenate((R,T[:,None]), axis=1)
-    hom_W = np.concatenate((R[:,:2],T[:,None]), axis=1)
+    W_z0 = np.concatenate((R[:,:2],T[:,None]), axis=1)
 
-    return W, R, T, hom_W
-
-def get_undistorted_corners(raw_dir, CHECKERBOARD, intr, dist, save=False):
-
-    h, w = CHECKERBOARD
-    undist_corners = {} 
-    fnames_raw = os.listdir(raw_dir)
-
-    # Using the derived camera parameters to undistort the image
-    for fname in fnames_raw:
-
-        img = cv2.imread(raw_dir+fname)
-        # Refining the camera matrix using parameters obtained by calibration
-        #newcameramtx, roi = cv2.getOptimalNewCameraMatrix(intr, dist, (w, h), 1, (w, h))
-
-        # Method 1 to undistort the image
-        #dst = cv2.undistort(img, intr, dist, None, newcameramtx)
-        dst = cv2.undistort(img, intr, dist, None, intr)
-
-        # Method 2 to undistort the image
-        #mapx, mapy = cv2.initUndistortRectifyMap(intr, dist, None, newcameramtx, (w, h), 5)
-        #dst = cv2.remap(img, mapx, mapy, cv2.INTER_LINEAR)
-
-        # Displaying the undistorted image
-        #cv2.imshow("undistorted image", dst)
-        #cv2.waitKey(0)
-
-        gray = cv2.cvtColor(dst, cv2.COLOR_BGR2GRAY)
-
-        ret, corners = cv2.findChessboardCornersSB(gray, CHECKERBOARD, \
-            cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_FAST_CHECK\
-            + cv2.CALIB_CB_NORMALIZE_IMAGE)
-
-        undist_corners[fname] = np.squeeze(corners)
-        # Save the undistorted image.
-        if save is True: 
-            undist_dir = './images_undistorted_corners/'
-            img = cv2.drawChessboardCorners(dst, CHECKERBOARD, corners, ret)
-            cv2.imwrite(f'{undist_dir}{fname}', img)
-
-    return undist_corners
+    return W, R, T, W_z0
 
 def estimate_lens_distortion(intr, Mextr, Mwps, Mips):
 
@@ -507,7 +528,7 @@ def estimate_lens_distortion(intr, Mextr, Mwps, Mips):
 
         for j in range(N):
 
-            ansx, ansy = normalized_projection(Mextr[m], wps[j])
+            ansx, ansy = image_to_normalized_projection(Mextr[m], wps[j])
             r = np.sqrt(ansx**2 + ansy**2)
             u, v = normalized_to_sensor_projection(intr, (ansx, ansy))
             du, dv = u-uc, v-vc
@@ -524,12 +545,12 @@ def estimate_lens_distortion(intr, Mextr, Mwps, Mips):
 
     return sol.x
 
-def normalized_projection(W, wp):
+def image_to_normalized_projection(extr, wp):
 
     hom_wp = np.ones(4, dtype=np.float64)
     hom_wp[:3] = wp
 
-    vec = np.dot(W, hom_wp)
+    vec = np.dot(extr, hom_wp)
     vec /= vec[2]
 
     (x, y) = vec[0:2]
@@ -550,16 +571,56 @@ def refine_all(intr, rdist, Mextr, Mwps, Mips):
     P = compose_parameter_vector(intr, rdist, Mextr)
     M = len(Mextr)
     N = len(Mwps[0])
-    X = np.zeros(2*M*N, dtype=np.float64)
     Y = np.zeros(2*M*N, dtype=np.float64)
 
     for m, (wps, ips) in enumerate(zip(Mwps,Mips)):
         for n, (wp,ip) in enumerate(zip(wps, ips)):
-            X[N*m+n  ] = wp[0]
-            X[N*m+n+1] = wp[1]
             Y[N*m+n  ] = ip[0]
             Y[N*m+n+1] = ip[1]
-    return
+
+    result = spo.least_squares(residuals_P, P, method='lm', args=(Mwps, Y))
+    opt_P = result.x
+    intr, k, Mextr = decompose_parameter_vector(opt_P)
+
+    return intr, k, Mextr
+
+def residuals_P(P, Mwps, Y):
+
+    projY = value_P(Mwps, P)
+    E = projY - Y
+
+    return E
+
+def value_P(Mwps, P):
+
+    M = len(Mwps) # the number of images.
+    N = Mwps[0].shape[0] # the number of corners.
+    projY = np.zeros(2*M*N, dtype=np.float64)
+
+    intr = np.zeros((3,3), dtype=np.float64)
+
+    intr[0,0] = P[0] # alpha
+    intr[1,1] = P[1] # beta
+    intr[0,1] = P[2] # gamma
+    intr[0,2] = P[3] # uc
+    intr[1,2] = P[4] # vc
+    intr[2,2] = 1
+
+    for m, wps in enumerate(Mwps):
+        i = 6*m+7
+        (rhox, rhoy, rhoz, tx, ty, tz) = P[i:i+6]
+        rho = np.array((rhox, rhoy, rhoz), dtype=np.float64)
+        t = np.array((tx, ty, tz), dtype=np.float64)
+        R = to_rotation_matrix(rho)
+        extr = np.concatenate((R,t[:,None]), axis=1)
+        for n, wp in enumerate(wps):
+            (x, y) = image_to_normalized_projection(extr, wp)
+            (u, v) = normalized_to_sensor_projection(intr, (x,y))
+
+            projY[2*N*m+2*n  ] = u
+            projY[2*N*m+2*n+1] = v
+
+    return projY
 
 def compose_parameter_vector(intr, rdist, Mextr):
 
@@ -571,9 +632,9 @@ def compose_parameter_vector(intr, rdist, Mextr):
     k0 = rdist[0]
     k1 = rdist[1]
 
+    M = len(Mextr)
     P = np.zeros(7+6*M, dtype=np.float64)
     P[0:7] = (alpha, beta, gamma, uc, vc, k0, k1)
-    M = len(Mextr)
 
     for m, w in enumerate(Mextr):
         R = w[:,:3]
@@ -604,23 +665,21 @@ def decompose_parameter_vector(P):
         Each tuple is the extrinsic parameters of the associated view.
         Each tuple has the form of (rho_x, rho_y, rho_z, t_x, t_y, t_z).
     """
-    (alpha, beta, gamma, uc, vc, k0, k1) = P[0:7]
     A = np.zeros((3,3), dtype=np.float64)
-    k = np.array([k0, k1])
-    A[0,0] = alpha
-    A[0,1] = gamma
-    A[0,2] = uc
-    A[1,1] = beta
-    A[1,2] = vc
+    A[0,0] = P[0] # alpha
+    A[0,1] = P[2] # gamma
+    A[0,2] = P[3] # uc
+    A[1,1] = P[1] # beta
+    A[1,2] = P[4] # vc
     A[2,2] = 1
-
+    k = np.array([P[5], P[6]])
     M = int((len(P)-7)/6)
     Ws = []
 
     for i in range(M):
         m = 6*i+7
-        rho = np.array([P[m:m+2]])
-        t = np.array([P[m+3:m+5]])
+        rho = P[m:m+3]
+        t = P[m+3:m+6]
         R = to_rotation_matrix(rho)
         W = np.concatenate((R,t[:,None]), axis=1)
         Ws.append(W)
@@ -668,41 +727,78 @@ def to_rodrigues_vector(R):
 
     return rho
 
+def get_undistorted_corners(raw_dir, CHECKERBOARD, intr, dist, save=False):
+
+    h, w = CHECKERBOARD
+    undist_corners = {} 
+    fnames_raw = os.listdir(raw_dir)
+
+    # Using the derived camera parameters to undistort the image
+    for fname in fnames_raw:
+
+        img = cv2.imread(raw_dir+fname)
+        # Refining the camera matrix using parameters obtained by calibration
+        #newcameramtx, roi = cv2.getOptimalNewCameraMatrix(intr, dist, (w, h), 1, (w, h))
+
+        # Method 1 to undistort the image
+        #dst = cv2.undistort(img, intr, dist, None, newcameramtx)
+        dst = cv2.undistort(img, intr, dist, None, intr)
+
+        # Method 2 to undistort the image
+        #mapx, mapy = cv2.initUndistortRectifyMap(intr, dist, None, newcameramtx, (w, h), 5)
+        #dst = cv2.remap(img, mapx, mapy, cv2.INTER_LINEAR)
+
+        # Displaying the undistorted image
+        #cv2.imshow("undistorted image", dst)
+        #cv2.waitKey(0)
+
+        gray = cv2.cvtColor(dst, cv2.COLOR_BGR2GRAY)
+
+        ret, corners = cv2.findChessboardCornersSB(gray, CHECKERBOARD, \
+            cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_FAST_CHECK\
+            + cv2.CALIB_CB_NORMALIZE_IMAGE)
+
+        undist_corners[fname] = np.squeeze(corners)
+        # Save the undistorted image.
+        if save is True: 
+            undist_dir = './images_undistorted_draw_corners/'
+            img = cv2.drawChessboardCorners(dst, CHECKERBOARD, corners, ret)
+            cv2.imwrite(f'{undist_dir}{fname}', img)
+
+    return undist_corners
+
 if __name__ == '__main__':
 
     # Defining the dimensions of checkerboard.
     w = 9
     h = 6
     CHECKERBOARD = (h, w)
-    raw_dir = './images_raw/'
-    save_dir = './strategy3/'
+    raw_dir = './images_raw_small/'
+    save_dir = './images_undistorted_small/'
 
     Mwps, Mips, fnames, (h_npixels, w_npixels) = get_world_points(CHECKERBOARD, raw_dir, save_dir)
 
-    Hs = get_homographies(Mwps, Mips)
+    ret, cv2_intr, cv2_dist, cv2_rvecs, cv2_tvecs = cv2.calibrateCamera(Mwps, Mips, (h_npixels, w_npixels), None, None)
 
-    #A_gam0 = get_camera_intrinsic(Hs, gamma=False)
-    #Ws_gam0, Rs_gam0, Ts_gam0 = get_extrinsics(A_gam0, Hs)
-    #print(Rs_gam0[0])
+    cv2_rot, cv2_jac = cv2.Rodrigues(cv2_rvecs[0])
+
+    opt_intr, opt_rdist, opt_Mexpr = calibrate(Mwps, Mips)
+
+    """
+    # Homography part is completely developed.
+    undist_corners = get_undistorted_corners(raw_dir, CHECKERBOARD, cv2_intr, cv2_dist, save=True)
+    Errs0, cv2_ip0, opt_ip0, cv2_H0, opt_H0 = homography_compare(Mwps[0], Mips[0], undist_corners['image_10.jpg'])
+    Errs1, cv2_ip1, opt_ip1, cv2_H1, opt_H1 = homography_compare(Mwps[1], Mips[1], undist_corners['image_11.jpg'])
 
     A = get_camera_intrinsic(Hs, gamma=True)
     Ws, Rs, Ts, hom_Ws = get_extrinsics(A, Hs)
 
     k = estimate_lens_distortion(A, Ws, Mwps, Mips)
+    opt_intr, opt_k, opt_Mextr = refine_all(A, k, Ws, Mwps, Mips)
 
-    ret, intr, dist, rvecs, tvecs = cv2.calibrateCamera(Mwps, Mips, (h_npixels, w_npixels), None, None)
-
-    """
     recon_H = np.dot(A,hom_Ws[0])
     recon_H /= recon_H[2,2]
     
-    rot_cv, jac_rot = cv2.Rodrigues(rvecs[0])
-
-    undist_corners = get_undistorted_corners(raw_dir, CHECKERBOARD, intr, dist, save=True)
-
-    Errs0, cv2_ip0, opt_ip0, cv2_H0, opt_H0 = homography_compare(Mwps[0], Mips[0], undist_corners['image_10.jpg'])
-    Errs1, cv2_ip1, opt_ip1, cv2_H1, opt_H1 = homography_compare(Mwps[1], Mips[1],undist_corners['image_11.jpg'])
-
     df = pd.DataFrame(Errs0, columns=['opencv', 'mine'])
     ax = df.plot(style=['-', 'o'])
     ax.set_xlabel('Corner number')
