@@ -1,4 +1,4 @@
-import os, sys
+import os, sys, time
 from pickletools import optimize
 import cv2
 import numpy as np
@@ -526,16 +526,16 @@ def estimate_lens_distortion(intr, Mextr, Mwps, Mips):
 
     for m, (wps, ips) in enumerate(zip(Mwps,Mips)):
 
-        for j in range(N):
+        for n, (wp, ip) in enumerate(zip(wps, ips)):
 
-            ansx, ansy = image_to_normalized_projection(Mextr[m], wps[j])
+            ansx, ansy = image_to_normalized_projection(Mextr[m], wp)
             r = np.sqrt(ansx**2 + ansy**2)
             u, v = normalized_to_sensor_projection(intr, (ansx, ansy))
             du, dv = u-uc, v-vc
-            D[2*l  ] = (du*r**2, du*r**4)
-            D[2*l+1] = (dv*r**2, dv*r**4)
-            udot = ips[j,0]
-            vdot = ips[j,1]
+            D[2*l  ] = (du*(r**2), du*(r**4))
+            D[2*l+1] = (dv*(r**2), dv*(r**4))
+            udot = ip[0]
+            vdot = ip[1]
             d[2*l  ] = udot - u
             d[2*l+1] = vdot - v
             l += 1
@@ -559,16 +559,17 @@ def image_to_normalized_projection(extr, wp):
 
 def normalized_to_sensor_projection(intr, normcoor):
 
-    hom_normcoor = np.zeros(3, dtype=np.float64)
+    hom_normcoor = np.ones(3, dtype=np.float64)
     hom_normcoor[:2] = normcoor
 
-    (u,v) = np.dot(intr[:2], hom_normcoor)
+    (u,v,z) = np.dot(intr, hom_normcoor)
 
     return (u,v)
 
 def refine_all(intr, rdist, Mextr, Mwps, Mips):
 
-    P = compose_parameter_vector(intr, rdist, Mextr)
+    P_init = compose_parameter_vector(intr, rdist, Mextr)
+
     M = len(Mextr)
     N = len(Mwps[0])
     Y = np.zeros(2*M*N, dtype=np.float64)
@@ -578,16 +579,20 @@ def refine_all(intr, rdist, Mextr, Mwps, Mips):
             Y[N*m+n  ] = ip[0]
             Y[N*m+n+1] = ip[1]
 
-    result = spo.least_squares(residuals_P, P, method='lm', args=(Mwps, Y))
-    opt_P = result.x
-    intr, k, Mextr = decompose_parameter_vector(opt_P)
+    start = time.time()
+    result = spo.least_squares(residuals_P, P_init, method='lm', args=(Mwps, Y))
+    end = time.time()
+    elapsed_time = end-start
+    print(elapsed_time)
+    P_opt = result.x
+    intr, k, Mextr = decompose_parameter_vector(P_opt)
 
     return intr, k, Mextr
 
-def residuals_P(P, Mwps, Y):
+def residuals_P(P, Mwps, Y_dist_observed):
 
-    projY = value_P(Mwps, P)
-    E = projY - Y
+    Y_dist_model = value_P(Mwps, P)
+    E = Y_dist_model - Y_dist_observed
 
     return E
 
@@ -595,8 +600,7 @@ def value_P(Mwps, P):
 
     M = len(Mwps) # the number of images.
     N = Mwps[0].shape[0] # the number of corners.
-    projY = np.zeros(2*M*N, dtype=np.float64)
-
+    Y_dist_model = np.zeros(2*M*N, dtype=np.float64)
     intr = np.zeros((3,3), dtype=np.float64)
 
     intr[0,0] = P[0] # alpha
@@ -606,6 +610,9 @@ def value_P(Mwps, P):
     intr[1,2] = P[4] # vc
     intr[2,2] = 1
 
+    k0 = P[5] # k0
+    k1 = P[6] # k1
+
     for m, wps in enumerate(Mwps):
         i = 6*m+7
         (rhox, rhoy, rhoz, tx, ty, tz) = P[i:i+6]
@@ -614,18 +621,32 @@ def value_P(Mwps, P):
         R = to_rotation_matrix(rho)
         extr = np.concatenate((R,t[:,None]), axis=1)
         for n, wp in enumerate(wps):
-            (x, y) = image_to_normalized_projection(extr, wp)
-            (u, v) = normalized_to_sensor_projection(intr, (x,y))
+            (projx, projy) = image_to_normalized_projection(extr, wp)
+            (x_warp, y_warp) = warp((projx, projy), (k0, k1))
+            (u, v) = normalized_to_sensor_projection(intr, (x_warp,y_warp))
 
-            projY[2*N*m+2*n  ] = u
-            projY[2*N*m+2*n+1] = v
+            Y_dist_model[2*N*m+2*n  ] = u
+            Y_dist_model[2*N*m+2*n+1] = v
 
-    return projY
+    return Y_dist_model
+
+def warp(projp, rdist):
+
+    x = projp[0]
+    y = projp[1]
+    r = np.sqrt(x**2+y**2)
+    k0 = rdist[0]
+    k1 = rdist[1]
+
+    x_warp = x * (1+k0*r**2+k1*r**4)
+    y_warp = y * (1+k0*r**2+k1*r**4)
+
+    return (x_warp, y_warp)
 
 def compose_parameter_vector(intr, rdist, Mextr):
 
     alpha = intr[0,0]
-    beta = intr[1,0]
+    beta = intr[1,1]
     gamma = intr[0,1]
     uc = intr[0,2]
     vc = intr[1,2]
@@ -657,11 +678,13 @@ def decompose_parameter_vector(P):
     -------
     intr : a tuple.
         (alpha, beta, gamma, uc, vc)
+
     rdist : a tuple.
         (k0, k1)
+
     Mextr : a list.
-        a list of tuples. 
-        The length of a list is M, the number of views.
+        A list that each element is a tuple. 
+        The length of a list is M which is the number of images.
         Each tuple is the extrinsic parameters of the associated view.
         Each tuple has the form of (rho_x, rho_y, rho_z, t_x, t_y, t_z).
     """
@@ -711,11 +734,12 @@ def to_rodrigues_vector(R):
         if c == 1: rho = np.zeros(3, dtype=np.float64)
         elif c == -1:
             Rp = R + np.identity(3)
-            arg_max_norm_col = np.argmax(np.linalg.norm(Rp, axis=0))
+            norm_col = np.linalg.norm(Rp, axis=0)
+            arg_max_norm_col = np.argmax(norm_col)
             v = Rp[:,arg_max_norm_col]
-            u = v / np.linalg.norm(v)
+            u = v / norm_col[arg_max_norm_col]
             (u0, u1, u2) = u
-            if (u0 < 0) or (u0==0 and u1<0) or (u0==u1==0 or u2<0): u = -u
+            if (u0 < 0) or ((u0==0) and (u1<0)) or ((u0==u1==0) or (u2<0)): u = -u
             rho = np.pi * u
         else: raise ValueError("Rodrigues vector cannot be drived due to the wrong rotation matrix.")
 
