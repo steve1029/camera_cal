@@ -60,11 +60,13 @@ def get_world_points(CHECKERBOARD, raw_dir, save_dir):
             Mwps.append(wps)
             #Mips.append(corners)
             Mips.append(np.squeeze(corners))
+            print(f"The corner of {fname} is not found.")
 
         else: 
             #raise ValueError(f"The corner of {fname} is not found.")
             print(f"The corner of {fname} is not found.")
-            continue
+
+        continue
 
     (h, w) = gray.shape[::-1]
 
