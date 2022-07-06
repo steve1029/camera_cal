@@ -1,6 +1,7 @@
 import os, sys, time
 from pickletools import optimize
 import cv2
+from cv2 import checkRange
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -60,7 +61,7 @@ def get_world_points(CHECKERBOARD, raw_dir, save_dir):
             Mwps.append(wps)
             #Mips.append(corners)
             Mips.append(np.squeeze(corners))
-            print(f"The corner of {fname} is not found.")
+            print(f"The corner of {fname} is found.")
 
         else: 
             #raise ValueError(f"The corner of {fname} is not found.")
@@ -753,6 +754,27 @@ def to_rodrigues_vector(R):
 
     return rho
 
+def draw_corners(raw_dir, save_dir, checkerboardhw):
+
+    fnames_raw = os.listdir(raw_dir)
+    compact_corners = {}
+
+    for fname in fnames_raw:
+
+        img = cv2.imread(raw_dir+fname)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+        ret, corners = cv2.findChessboardCornersSB(gray, checkerboardhw, \
+            cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_FAST_CHECK\
+            + cv2.CALIB_CB_NORMALIZE_IMAGE)
+
+        compact_corners[fname] = np.squeeze(corners)
+
+        img = cv2.drawChessboardCorners(img, checkerboardhw, corners, ret)
+        cv2.imwrite(f'{save_dir}{fname}_draw_corners.png', img)
+
+    return compact_corners
+
 def get_undistorted_corners(raw_dir, CHECKERBOARD, intr, dist, save=False):
 
     h, w = CHECKERBOARD
@@ -785,6 +807,7 @@ def get_undistorted_corners(raw_dir, CHECKERBOARD, intr, dist, save=False):
             + cv2.CALIB_CB_NORMALIZE_IMAGE)
 
         undist_corners[fname] = np.squeeze(corners)
+
         # Save the undistorted image.
         if save is True: 
             undist_dir = './images_undistorted_draw_corners/'
