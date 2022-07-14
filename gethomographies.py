@@ -10,7 +10,7 @@ import scipy.optimize as spo
 
 """The homography matrix is calculated.
 The 3D world points are given with Z=0.
-The coordinates of each image points are 
+The coordinates of each image point is 
 given by cv2.findChessboardCornersSB() method.
 """
 
@@ -123,7 +123,7 @@ def get_homographies(Mwps, Mips):
     return Hs
 
 def estimate_homography(wps, ips):
-    """Estimate the homography matrix for each image
+    """Estimate the homography matrix associated with each image.
 
     Parameters
     ----------
